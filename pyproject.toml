@@ -7,7 +7,7 @@ name = "llm-rate-limiter"
 version = "0.1.0"
 description = "Thread-safe sliding-window and token-bucket rate limiter for LLM API gateways, in-memory or Redis-backed"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Aryan Sharma" }]
 dependencies = []
