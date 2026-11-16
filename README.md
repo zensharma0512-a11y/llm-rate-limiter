@@ -1,5 +1,7 @@
 # llm-rate-limiter
 
+[![tests](https://github.com/zensharma0512-a11y/llm-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/zensharma0512-a11y/llm-rate-limiter/actions/workflows/ci.yml)
+
 A rate limiter for LLM API gateways, where many clients share limited model
 capacity. It has two algorithms (**sliding window** and **token bucket**) and
 two backends: **in-memory** for a single process, and **Redis** for many
