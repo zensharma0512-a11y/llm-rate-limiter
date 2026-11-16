@@ -1,0 +1,14 @@
+Python 3.13.18 on x86_64, 2 CPUs
+
+backend  strategy        workload   1 thr     4 thr    16 thr  
+----------------------------------------------------------------
+memory   sliding_window  hot       839,750   878,250   835,692
+memory   sliding_window  spread    895,056   884,376   861,467
+memory   token_bucket    hot       879,851   881,156   813,334
+memory   token_bucket    spread    927,877   893,247   793,032
+redis    sliding_window  hot        16,071    32,547    43,598
+redis    sliding_window  spread     12,485    32,814    24,142
+redis    token_bucket    hot        14,694    41,957    28,555
+redis    token_bucket    spread     14,568    41,663    29,932
+
+Units: decisions per second (higher is better).
