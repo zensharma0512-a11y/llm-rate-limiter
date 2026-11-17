@@ -11,7 +11,7 @@ import random
 import threading
 import unittest
 
-from ratelimiter import RateLimiter, RedisRateLimiter, Strategy
+from ratekeeper import RateLimiter, RedisRateLimiter, Strategy
 from tests.mini_redis import MiniRedis, RedisServer
 from tests.test_memory import FakeClock
 
@@ -56,7 +56,7 @@ class RedisSlidingWindowTests(RedisTestCase):
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 10.0)
 
-    def test_partial_recovery_is_rolling(self):
+    def test_capacity_returns_gradually(self):
         rl = self.make()
         rl.allow("a", "gpt")
         self.clk.advance(4)
@@ -162,7 +162,7 @@ class ParityTests(RedisTestCase):
 
 def hammer_process(port, strategy, cfg, n, start, out):
     """Runs in a separate OS process with its own Redis connection."""
-    from ratelimiter import RedisRateLimiter
+    from ratekeeper import RedisRateLimiter
     from tests.mini_redis import MiniRedis
     c = MiniRedis(port=port)
     rl = RedisRateLimiter(c, strategy, **cfg)

@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llm-rate-limiter"
+name = "ratekeeper"
 version = "0.1.0"
-description = "Thread-safe sliding-window and token-bucket rate limiter for LLM API gateways, in-memory or Redis-backed"
+description = "Per-tenant request quotas for AI model APIs: sliding-window and token-bucket throttling, in-process or across a fleet via Redis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -16,4 +16,4 @@ dependencies = []
 redis = ["redis>=4.0"]
 
 [tool.setuptools]
-packages = ["ratelimiter"]
+packages = ["ratekeeper"]

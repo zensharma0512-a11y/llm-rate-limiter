@@ -1,14 +1,12 @@
 """
-Distributed rate limiter backed by Redis.
+Fleet-wide quota engine backed by Redis.
 
-Same API and same semantics as the in-memory RateLimiter, but state lives in
-Redis so every gateway instance shares one limit. Each decision runs as a
-single Lua script, which Redis executes atomically: the read-refill-decide-
-write sequence can never interleave with another request, from any process
-on any machine.
+Drop-in twin of the single-process RateLimiter: identical API and identical
+verdicts, but quotas are stored in Redis so every server in a fleet enforces
+the same budget. Each verdict is one Lua script, which Redis runs as an
+indivisible unit, so no two servers can ever both spend the last unit.
 
-Time comes from the Redis server's clock (TIME), not from the gateway
-hosts, so clock skew between gateway machines cannot affect decisions.
+The clock is Redis's own (TIME), so drift between app servers is irrelevant.
 
 Works with any client that has redis-py's interface:
     client.evalsha(sha, numkeys, *keys_and_args)

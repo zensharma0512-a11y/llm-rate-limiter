@@ -16,7 +16,7 @@ import platform
 import threading
 import time
 
-from ratelimiter import RateLimiter, RedisRateLimiter, Strategy
+from ratekeeper import RateLimiter, RedisRateLimiter, Strategy
 from tests.mini_redis import MiniRedis, RedisServer
 
 CONFIGS = {

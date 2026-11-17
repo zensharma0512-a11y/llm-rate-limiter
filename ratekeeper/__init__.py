@@ -1,4 +1,4 @@
-"""Rate limiting for LLM API gateways: in-memory and Redis-backed."""
+"""Per-tenant request quotas for AI model APIs: in-process or shared through Redis."""
 
 from .memory import Decision, RateLimiter, Stats, Strategy
 from .redis_backend import RedisRateLimiter

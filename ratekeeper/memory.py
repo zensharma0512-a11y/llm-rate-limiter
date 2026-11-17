@@ -1,5 +1,5 @@
 """
-In-memory rate limiter for an LLM API gateway (single process).
+Single-process quota engine: sliding-window and token-bucket throttling.
 
 Two strategies:
   * SlidingWindow  - exact sliding log: at most `limit` units of cost in any
@@ -7,10 +7,10 @@ Two strategies:
   * TokenBucket    - bucket of `capacity` tokens refilled continuously at
                      `refill_rate` tokens/second.
 
-State is kept independently per (client_id, resource_id). Each key has its own
-lock, so unrelated clients never contend; a short registry lock guards only
-key creation. Statistics are updated inside the same critical section as the
-decision, so they always agree with what callers observed.
+Every (tenant, model) pair has its own quota and its own lock, so a busy
+tenant never blocks a quiet one; a brief registry lock is taken only the first
+time a pair is seen. Counters are bumped in the same locked step as the
+verdict, so the numbers can never disagree with what callers were told.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ class Strategy(str, Enum):
 @dataclass(frozen=True)
 class Decision:
     allowed: bool
-    remaining: int          # whole units still available right after this call
-    retry_after: float      # seconds until this same request could succeed (0 if allowed)
+    remaining: int          # whole units left right after this call
+    retry_after: float      # seconds to wait before retrying this request (0 if allowed)
 
 
 @dataclass

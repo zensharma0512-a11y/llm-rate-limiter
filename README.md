@@ -1,164 +1,160 @@
-# llm-rate-limiter
+# ratekeeper
 
-[![tests](https://github.com/zensharma0512-a11y/llm-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/zensharma0512-a11y/llm-rate-limiter/actions/workflows/ci.yml)
+[![tests](https://github.com/zensharma0512-a11y/ratekeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/zensharma0512-a11y/ratekeeper/actions/workflows/ci.yml)
 
-A rate limiter for LLM API gateways, where many clients share limited model
-capacity. It has two algorithms (**sliding window** and **token bucket**) and
-two backends: **in-memory** for a single process, and **Redis** for many
-gateway instances that need to share one limit.
-
-Every request gets a decision, the remaining capacity, and how long until it
-would succeed:
+**Per-tenant request quotas for AI model APIs.** When many customers call the
+same expensive models, one runaway script shouldn't starve everyone else.
+ratekeeper gives each tenant its own budget per model, enforces it with either
+of two classic throttling algorithms, and tells the caller exactly when to try
+again. Run it inside one process, or across a whole fleet of servers through
+Redis.
 
 ```python
-from ratelimiter import RateLimiter, Strategy
+from ratekeeper import RateLimiter, Strategy
 
-rl = RateLimiter(Strategy.TOKEN_BUCKET, capacity=20, refill_rate=5)   # 20 burst, 5/s sustained
+quota = RateLimiter(Strategy.TOKEN_BUCKET, capacity=20, refill_rate=5)  # bursts of 20, 5/s steady
 
-d = rl.allow("client-42", "gpt-large", cost=3)   # cost = weight of this request
-if not d.allowed:
-    return 429, {"Retry-After": round(d.retry_after, 2)}
-print(d.remaining)                               # whole units left right now
-print(rl.stats("client-42", "gpt-large"))        # Stats(total=…, allowed=…, rejected=…)
+v = quota.allow("acme-corp", "model-large", cost=3)   # heavier calls can cost more
+if not v.allowed:
+    return 429, {"Retry-After": round(v.retry_after, 2)}
+v.remaining                                           # budget left after this call
+quota.stats("acme-corp", "model-large")               # Stats(total, allowed, rejected)
 ```
 
-The same code runs across servers by swapping in the Redis backend:
+To share one budget across every server, pass a Redis client:
 
 ```python
 import redis
-from ratelimiter import RedisRateLimiter, Strategy
+from ratekeeper import RedisRateLimiter, Strategy
 
-rl = RedisRateLimiter(redis.Redis(), Strategy.SLIDING_WINDOW, limit=100, window=60)
+quota = RedisRateLimiter(redis.Redis(), Strategy.SLIDING_WINDOW, limit=100, window=60)
 ```
 
-There are no runtime dependencies. The Redis backend takes any client with
-redis-py's interface.
+Pure Python standard library; the Redis version works with any redis-py-style client.
 
-## What it guarantees
+## Two algorithms, two personalities
 
-| Property | How |
-|---|---|
-| Never admits more than the limit, even under concurrency | Each decision is one critical section: a per-key lock (memory) or one Lua script (Redis) |
-| Clients and resources are isolated | State is keyed by `(client_id, resource_id)`; one hot client can't slow another |
-| Statistics always match the decisions | Counters are updated inside the same critical section as the decision |
-| Rejected requests cost nothing | Only admitted requests are recorded or deduct tokens |
-| Accurate `retry_after`, including weighted requests | Sliding window walks the oldest events until enough cost would expire; token bucket computes `(cost − tokens) / rate` |
-| Safe when the clock jumps | Uses monotonic time (memory) or the Redis server clock (Redis); a backwards step is ignored |
-| Requests that could never fit fail loudly | `cost > capacity` raises `ValueError` instead of being rejected forever |
+- **Token bucket**: tolerant of bursts. A tenant can spend its saved-up
+  budget at once, then is held to the steady refill rate. Good for
+  interactive users.
+- **Sliding window (exact log)**: strict. No more than *N* units in *any*
+  rolling *W*-second span, even across window edges, where a naive fixed
+  window would let through up to 2N. Good for hard contractual caps.
 
-## Design decisions
+## Promises the code keeps
 
-**Exact sliding log rather than an approximate counter.** The sliding window
-stores one entry per admitted request (with its cost), so "at most N in any
-rolling W seconds" holds exactly, including at window edges, where a fixed
-window lets through up to 2N. The cost is memory that grows with the limit for
-each key. For very high limits, a two-bucket sliding counter would trade
-exactness for O(1) memory (see *Future work*).
+1. **No overspending, ever.** Each verdict happens in one locked step (a lock
+   per tenant-model pair in-process, one Lua script in Redis), so concurrent
+   calls can't both take the last unit.
+2. **Tenants can't hurt each other.** Budgets are keyed by `(tenant, model)`,
+   and so are the locks.
+3. **Counters tell the truth.** Allowed/rejected totals update in the same
+   step as the verdict.
+4. **Refusals are free.** A rejected call spends nothing and doesn't push the
+   retry time further out.
+5. **`retry_after` is exact.** It's computed, not guessed, even for calls that
+   cost more than 1.
+6. **Clock trouble is contained.** Monotonic time in-process; Redis's own
+   clock across servers; a clock that steps backwards is ignored.
+7. **Impossible requests fail loudly.** A cost larger than the whole budget
+   raises an error instead of being refused forever.
 
-**A lock per key, not one global lock.** A global lock would make every
-client wait on every other client. Each `(client, resource)` key has its own
-`threading.Lock`. A short registry lock is held only when a new key is first
-created, with double-checked creation so the common path takes no shared lock.
-In the benchmark, the "spread" workload (every thread on its own key) runs as
-fast as the "hot" one (all threads on one key).
+## Engineering notes
 
-**The time is read inside the lock.** Reading the clock before acquiring the
-lock would let a thread that read an earlier time commit after a later one,
-which breaks the event log's ordering. Reading inside the lock keeps time
-monotonic for each key.
+**Fine-grained locking.** A single global lock would make every tenant queue
+behind every other tenant. Instead, each pair gets its own lock, created
+lazily behind a double-checked registry, so the hot path never touches shared
+state. In the benchmark below, one tenant hammering one model performs the
+same as many tenants spread across many keys.
 
-**Lua scripts for the distributed backend.** A read-modify-write over the
-network (GET tokens → compute → SET) has a race between servers. Each decision
-is a Lua script that Redis runs atomically, so expire → decide → write → count
-is one indivisible step across all gateway processes. Scripts are called with
-`EVALSHA` and fall back to `EVAL` on the first `NOSCRIPT`.
+**Timestamps are taken under the lock.** Read the clock before locking and a
+thread holding an older time can commit after a newer one, scrambling the
+event log. Reading it inside the lock keeps each key's history in order.
 
-**Redis's clock, not the gateways'.** The scripts call `TIME` on the Redis
-server, so clock drift between gateway machines can't give one server extra
-capacity.
+**Atomic Lua instead of read-then-write.** Across servers, "fetch budget,
+decide, store budget" is a race. Each verdict is a Lua script, which Redis
+runs without interruption, so expiring, deciding, writing and counting are a
+single step from every server's point of view. Calls use `EVALSHA` and fall
+back to `EVAL` the first time a server hasn't cached the script yet.
 
-**Keys clean themselves up.** Every Redis key gets a TTL equal to how long its
-state stays meaningful: the window length for sliding window, and the time to
-refill completely for token bucket (an expired bucket is the same as a full
-one). Idle clients cost no Redis memory. The keys for one `(client, resource)`
-share a `{hash tag}`, so in Redis Cluster they map to the same slot.
+**Self-cleaning keys.** Every Redis key expires once its contents stop
+mattering: after one window for the sliding log, after a full refill for the
+bucket (a vanished bucket and a full bucket behave identically). Idle tenants
+cost no memory. A tenant's keys share a `{hash tag}` so they stay in one
+Redis Cluster slot.
 
-## Testing
+**The trade-off I accepted.** The exact sliding log stores one entry per
+admitted call, so its memory grows with the limit. That buys precision; for
+very large limits an approximate two-bucket counter would be the better
+choice (see the roadmap).
+
+## How it's verified
 
 ```bash
 python -m unittest discover -s tests -t .
 ```
 
-There are 27 tests. The Redis tests start a throwaway `redis-server` on a free
-port, or use `REDIS_PORT` if it is set (as CI does).
+27 tests, run on every push against Python 3.10, 3.12 and 3.13 with a real
+Redis server.
 
-- **Algorithm tests** use an injected fake clock, so every expiry and refill
-  can be checked to exact timestamps: partial recovery, weighted costs, the
-  refill cap, and a clock that goes backwards.
-- **Concurrency:** 32 threads send 6,400 requests at a limit of 100, and
-  exactly 100 are admitted. The stats add up to the number of calls.
-- **Parity:** the same 2,000-step random workload (random timing, keys and
-  costs) runs through both backends, which must make identical decisions,
-  remaining counts, retry times and stats at every step. This proves the Lua
-  is a faithful port of the Python.
-- **Distributed:** 4 separate OS processes, each with its own Redis connection,
-  send 800 requests at one shared limit of 150, and exactly 150 are admitted.
+- **Deterministic timing.** A fake clock is injected, so expiry and refill are
+  checked to the exact second: budget trickling back, weighted calls, the
+  refill ceiling, a clock jumping backwards.
+- **Thread storm.** 32 threads fire 6,400 calls at a budget of 100, and
+  exactly 100 succeed, with counters that add up.
+- **Twin check.** One 2,000-step randomized workload is replayed against both
+  versions, which must agree on every verdict, balance, retry time and
+  counter. This is the proof that the Lua matches the Python.
+- **Multi-process.** 4 separate OS processes, each with its own Redis
+  connection, send 800 calls at one shared budget of 150, and exactly 150
+  succeed.
 
-## Benchmark
+## Performance
 
 ```bash
 python -m bench.benchmark
 ```
 
-Decisions per second on Python 3.13, a 2-vCPU cloud sandbox, with Redis 7.0 on
-the same machine. Full output is in [`bench/results.txt`](bench/results.txt).
+Verdicts per second; Python 3.13 on a 2-vCPU cloud VM, Redis 7.0 on the same
+machine. Raw output: [`bench/results.txt`](bench/results.txt).
 
-| Backend | Strategy | Workload | 1 thread | 4 threads | 16 threads |
+| Version | Algorithm | Load | 1 thread | 4 threads | 16 threads |
 |---|---|---|---:|---:|---:|
-| memory | sliding window | hot key | 839,750 | 878,250 | 835,692 |
-| memory | sliding window | spread keys | 895,056 | 884,376 | 861,467 |
-| memory | token bucket | hot key | 879,851 | 881,156 | 813,334 |
-| memory | token bucket | spread keys | 927,877 | 893,247 | 793,032 |
-| redis | sliding window | hot key | 16,071 | 32,547 | 43,598 |
-| redis | token bucket | hot key | 14,694 | 41,957 | 28,555 |
+| in-process | sliding window | one hot key | 839,750 | 878,250 | 835,692 |
+| in-process | sliding window | key per thread | 895,056 | 884,376 | 861,467 |
+| in-process | token bucket | one hot key | 879,851 | 881,156 | 813,334 |
+| in-process | token bucket | key per thread | 927,877 | 893,247 | 793,032 |
+| Redis | sliding window | one hot key | 16,071 | 32,547 | 43,598 |
+| Redis | token bucket | one hot key | 14,694 | 41,957 | 28,555 |
 
-How to read it:
+The in-process engine sustains roughly 850K verdicts/s, about a microsecond
+each, and holds steady from 1 to 16 threads instead of degrading under lock
+contention. The Redis engine is bound by network round-trips (one per
+verdict) and climbs as more of them overlap. On this small box Redis competes
+with the benchmark for CPU, hence the noisy 16-thread column.
 
-- **In-memory** handles about 0.8–0.9 million decisions per second, and
-  throughput stays flat from 1 to 16 threads instead of collapsing under lock
-  contention. That is about 1 µs of overhead per request, which is negligible
-  next to an LLM call.
-- **Redis** is limited by network round-trips, at one round-trip per decision.
-  Throughput rises with concurrency as round-trips overlap. On this 2-CPU box
-  the Redis server competes with the benchmark threads for CPU, which explains
-  the noise at 16 threads. Expect higher numbers on separate hardware.
+## Roadmap
 
-## Limitations and future work
+- Evict idle tenants from the in-process engine (TTL sweep or LRU cap).
+- Make the fleet-wide counters Redis Cluster friendly (per-slot aggregation).
+- A `SLIDING_COUNTER` algorithm for O(1) memory at very large limits.
+- Charge by model tokens rather than calls, reconciling after the response
+  arrives since output length isn't known upfront.
+- Emit standard `RateLimit-*` headers; add an `asyncio` API.
 
-- The in-memory backend never evicts idle keys. A gateway with millions of
-  short-lived clients would need a background sweep or an LRU bound.
-- The global stats key sits outside the per-key hash tag. On Redis Cluster,
-  disable it or aggregate per-slot counters instead.
-- Sliding-log memory grows with the limit. Add a `SLIDING_COUNTER` strategy
-  (weighted current and previous window) for very high limits.
-- Add LLM-specific cost: charge by tokens (prompt + completion) and settle the
-  difference after the response, since output length isn't known in advance.
-- Return standard `RateLimit-*` response headers and add an async (`asyncio`)
-  API.
-
-## Layout
+## Repository map
 
 ```
-ratelimiter/
-  memory.py          in-memory limiter (both strategies, per-key locking, stats)
-  redis_backend.py   Redis limiter (Lua scripts, server clock, TTL cleanup)
+ratekeeper/
+  memory.py          in-process engine
+  redis_backend.py   fleet engine (Lua, server clock, auto-expiry)
 tests/
-  test_memory.py     algorithm + thread-safety tests
-  test_redis.py      Redis tests, parity test, multi-process test
-  mini_redis.py      dependency-free Redis client and test server launcher
+  test_memory.py     algorithm and thread tests
+  test_redis.py      Redis, twin and multi-process tests
+  mini_redis.py      zero-dependency Redis client + throwaway server for tests
 bench/
   benchmark.py       throughput benchmark
-  results.txt        results quoted above
+  results.txt        raw numbers behind the table above
 ```
 
 ## License

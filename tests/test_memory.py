@@ -1,7 +1,7 @@
 import threading
 import unittest
 
-from ratelimiter import RateLimiter, Strategy
+from ratekeeper import RateLimiter, Strategy
 
 
 class FakeClock:
@@ -33,7 +33,7 @@ class SlidingWindowTests(unittest.TestCase):
         self.assertEqual(d.remaining, 0)
         self.assertAlmostEqual(d.retry_after, 10.0)
 
-    def test_partial_recovery_is_rolling(self):
+    def test_capacity_returns_gradually(self):
         self.rl.allow("a", "gpt")
         self.clk.advance(4)
         self.rl.allow("a", "gpt")
