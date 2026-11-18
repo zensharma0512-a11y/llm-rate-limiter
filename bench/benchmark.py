@@ -31,7 +31,7 @@ def run(make_limiter, threads, per_thread, spread):
 
     def worker(i):
         rl = limiters[i]
-        key = (f"client{i}" if spread else "client", "gpt")
+        key = (f"client{i}" if spread else "client", "model-a")
         barrier.wait()
         for _ in range(per_thread):
             rl.allow(*key)

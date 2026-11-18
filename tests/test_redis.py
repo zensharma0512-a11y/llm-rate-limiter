@@ -50,40 +50,40 @@ class RedisSlidingWindowTests(RedisTestCase):
     def test_accepts_up_to_limit_then_rejects(self):
         rl = self.make()
         for remaining in (2, 1, 0):
-            d = rl.allow("a", "gpt")
+            d = rl.allow("a", "model-a")
             self.assertEqual((d.allowed, d.remaining), (True, remaining))
-        d = rl.allow("a", "gpt")
+        d = rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 10.0)
 
     def test_capacity_returns_gradually(self):
         rl = self.make()
-        rl.allow("a", "gpt")
+        rl.allow("a", "model-a")
         self.clk.advance(4)
-        rl.allow("a", "gpt")
-        rl.allow("a", "gpt")
-        d = rl.allow("a", "gpt")
+        rl.allow("a", "model-a")
+        rl.allow("a", "model-a")
+        d = rl.allow("a", "model-a")
         self.assertAlmostEqual(d.retry_after, 6.0)
         self.clk.advance(6)
-        self.assertTrue(rl.allow("a", "gpt").allowed)
-        self.assertFalse(rl.allow("a", "gpt").allowed)
+        self.assertTrue(rl.allow("a", "model-a").allowed)
+        self.assertFalse(rl.allow("a", "model-a").allowed)
 
     def test_weighted_cost(self):
         rl = self.make()
-        rl.allow("a", "gpt")
+        rl.allow("a", "model-a")
         self.clk.advance(2)
-        rl.allow("a", "gpt")
+        rl.allow("a", "model-a")
         self.clk.advance(2)
-        d = rl.allow("a", "gpt", cost=3)
+        d = rl.allow("a", "model-a", cost=3)
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 8.0)
         self.clk.advance(8)
-        self.assertTrue(rl.allow("a", "gpt", cost=3).allowed)
+        self.assertTrue(rl.allow("a", "model-a", cost=3).allowed)
 
     def test_stats_and_isolation(self):
         rl = RedisRateLimiter(self.r, Strategy.SLIDING_WINDOW, limit=1, window=60, clock=self.clk)
-        rl.allow("a", "gpt"); rl.allow("a", "gpt"); rl.allow("a", "claude"); rl.allow("b", "gpt")
-        s = rl.stats("a", "gpt")
+        rl.allow("a", "model-a"); rl.allow("a", "model-a"); rl.allow("a", "model-b"); rl.allow("b", "model-a")
+        s = rl.stats("a", "model-a")
         self.assertEqual((s.total, s.allowed, s.rejected), (2, 1, 1))
         g = rl.stats()
         self.assertEqual((g.total, g.allowed, g.rejected), (4, 3, 1))
@@ -91,14 +91,14 @@ class RedisSlidingWindowTests(RedisTestCase):
     def test_reset(self):
         rl = self.make()
         for _ in range(4):
-            rl.allow("a", "gpt")
-        rl.reset("a", "gpt")
-        self.assertEqual(rl.allow("a", "gpt").remaining, 2)
+            rl.allow("a", "model-a")
+        rl.reset("a", "model-a")
+        self.assertEqual(rl.allow("a", "model-a").remaining, 2)
 
     def test_keys_get_ttl(self):
         rl = self.make()
-        rl.allow("a", "gpt")
-        ttl = self.r.execute("PTTL", "rl:{a|gpt}:log")
+        rl.allow("a", "model-a")
+        ttl = self.r.execute("PTTL", "rl:{a|model-a}:log")
         self.assertTrue(10_000 < ttl <= 11_000)
 
 
@@ -110,27 +110,27 @@ class RedisTokenBucketTests(RedisTestCase):
     def test_burst_refill_and_cap(self):
         rl = self.make()
         for _ in range(5):
-            self.assertTrue(rl.allow("a", "gpt").allowed)
-        d = rl.allow("a", "gpt")
+            self.assertTrue(rl.allow("a", "model-a").allowed)
+        d = rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 0.5)
         self.clk.advance(0.75)
-        d = rl.allow("a", "gpt")
+        d = rl.allow("a", "model-a")
         self.assertEqual((d.allowed, d.remaining), (True, 0))
         self.clk.advance(1000)
-        self.assertEqual(rl.allow("a", "gpt").remaining, 4)
+        self.assertEqual(rl.allow("a", "model-a").remaining, 4)
 
     def test_backwards_clock(self):
         rl = self.make()
-        rl.allow("a", "gpt")
+        rl.allow("a", "model-a")
         self.clk.advance(-50)
-        self.assertEqual(rl.allow("a", "gpt").remaining, 3)
+        self.assertEqual(rl.allow("a", "model-a").remaining, 3)
 
     def test_server_clock_used_by_default(self):
         rl = RedisRateLimiter(self.r, Strategy.TOKEN_BUCKET, capacity=2, refill_rate=0.001)
-        self.assertTrue(rl.allow("a", "gpt").allowed)
-        self.assertTrue(rl.allow("a", "gpt").allowed)
-        d = rl.allow("a", "gpt")
+        self.assertTrue(rl.allow("a", "model-a").allowed)
+        self.assertTrue(rl.allow("a", "model-a").allowed)
+        d = rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertGreater(d.retry_after, 900)
 
@@ -146,7 +146,7 @@ class ParityTests(RedisTestCase):
         for step in range(2000):
             dt = rng.choice([0, 0, 0, 0.25, 0.5, 1, 3])
             mem_clk.advance(dt); red_clk.advance(dt)
-            key = (rng.choice("ab"), rng.choice(["gpt", "claude"]))
+            key = (rng.choice("ab"), rng.choice(["model-a", "model-b"]))
             cost = rng.choice([1, 1, 1, 2, 3])
             a, b = mem.allow(*key, cost=cost), red.allow(*key, cost=cost)
             self.assertEqual((a.allowed, a.remaining), (b.allowed, b.remaining), f"step {step}")
@@ -167,7 +167,7 @@ def hammer_process(port, strategy, cfg, n, start, out):
     c = MiniRedis(port=port)
     rl = RedisRateLimiter(c, strategy, **cfg)
     start.wait()
-    out.put(sum(rl.allow("shared", "gpt").allowed for _ in range(n)))
+    out.put(sum(rl.allow("shared", "model-a").allowed for _ in range(n)))
     c.close()
 
 
@@ -181,7 +181,7 @@ class DistributedConcurrencyTests(RedisTestCase):
             c = _client()
             rl = RedisRateLimiter(c, Strategy.SLIDING_WINDOW, **rl_cfg)
             barrier.wait()
-            n = sum(rl.allow("shared", "gpt").allowed for _ in range(100))
+            n = sum(rl.allow("shared", "model-a").allowed for _ in range(100))
             c.close()
             with lock:
                 admitted[0] += n

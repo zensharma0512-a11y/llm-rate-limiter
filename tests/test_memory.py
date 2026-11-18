@@ -25,42 +25,42 @@ class SlidingWindowTests(unittest.TestCase):
 
     def test_accepts_up_to_limit_then_rejects(self):
         for remaining in (2, 1, 0):
-            d = self.rl.allow("a", "gpt")
+            d = self.rl.allow("a", "model-a")
             self.assertTrue(d.allowed)
             self.assertEqual(d.remaining, remaining)
-        d = self.rl.allow("a", "gpt")
+        d = self.rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertEqual(d.remaining, 0)
         self.assertAlmostEqual(d.retry_after, 10.0)
 
     def test_capacity_returns_gradually(self):
-        self.rl.allow("a", "gpt")
+        self.rl.allow("a", "model-a")
         self.clk.advance(4)
-        self.rl.allow("a", "gpt")
-        self.rl.allow("a", "gpt")
-        d = self.rl.allow("a", "gpt")
+        self.rl.allow("a", "model-a")
+        self.rl.allow("a", "model-a")
+        d = self.rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 6.0)   # first event expires at t+10
         self.clk.advance(6)
-        d = self.rl.allow("a", "gpt")
+        d = self.rl.allow("a", "model-a")
         self.assertTrue(d.allowed)                    # only one slot came back
         self.assertEqual(d.remaining, 0)
-        self.assertFalse(self.rl.allow("a", "gpt").allowed)
+        self.assertFalse(self.rl.allow("a", "model-a").allowed)
 
     def test_rejected_requests_do_not_consume(self):
         for _ in range(3):
-            self.rl.allow("a", "gpt")
+            self.rl.allow("a", "model-a")
         for _ in range(50):
-            self.rl.allow("a", "gpt")
+            self.rl.allow("a", "model-a")
         self.clk.advance(10)
-        self.assertEqual(self.rl.allow("a", "gpt").remaining, 2)
+        self.assertEqual(self.rl.allow("a", "model-a").remaining, 2)
 
     def test_weighted_cost_retry_after(self):
-        self.rl.allow("a", "gpt")          # t=0
+        self.rl.allow("a", "model-a")          # t=0
         self.clk.advance(2)
-        self.rl.allow("a", "gpt")          # t=2
+        self.rl.allow("a", "model-a")          # t=2
         self.clk.advance(2)
-        d = self.rl.allow("a", "gpt", cost=3)   # needs both earlier events gone
+        d = self.rl.allow("a", "model-a", cost=3)   # needs both earlier events gone
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 8.0)  # second event expires at 2+10-4
 
@@ -72,45 +72,45 @@ class TokenBucketTests(unittest.TestCase):
 
     def test_burst_then_reject(self):
         for i in range(5):
-            self.assertTrue(self.rl.allow("a", "gpt").allowed)
-        d = self.rl.allow("a", "gpt")
+            self.assertTrue(self.rl.allow("a", "model-a").allowed)
+        d = self.rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 0.5)
 
     def test_continuous_refill_and_cap(self):
         for _ in range(5):
-            self.rl.allow("a", "gpt")
+            self.rl.allow("a", "model-a")
         self.clk.advance(0.75)              # 1.5 tokens
-        d = self.rl.allow("a", "gpt")
+        d = self.rl.allow("a", "model-a")
         self.assertTrue(d.allowed)
         self.assertEqual(d.remaining, 0)    # 0.5 left, floored
-        d = self.rl.allow("a", "gpt")
+        d = self.rl.allow("a", "model-a")
         self.assertFalse(d.allowed)
         self.assertAlmostEqual(d.retry_after, 0.25)
         self.clk.advance(1000)              # never exceeds capacity
-        self.assertEqual(self.rl.allow("a", "gpt").remaining, 4)
+        self.assertEqual(self.rl.allow("a", "model-a").remaining, 4)
 
     def test_clock_going_backwards_is_safe(self):
-        self.rl.allow("a", "gpt")
+        self.rl.allow("a", "model-a")
         self.clk.advance(-50)
-        d = self.rl.allow("a", "gpt")
+        d = self.rl.allow("a", "model-a")
         self.assertTrue(d.allowed)
         self.assertEqual(d.remaining, 3)
 
     def test_cost_larger_than_capacity_raises(self):
         with self.assertRaises(ValueError):
-            self.rl.allow("a", "gpt", cost=6)
+            self.rl.allow("a", "model-a", cost=6)
 
 
 class IsolationAndStatsTests(unittest.TestCase):
     def test_clients_and_resources_are_isolated(self):
         clk = FakeClock()
         rl = RateLimiter(Strategy.SLIDING_WINDOW, limit=1, window=60, clock=clk)
-        self.assertTrue(rl.allow("a", "gpt").allowed)
-        self.assertFalse(rl.allow("a", "gpt").allowed)
-        self.assertTrue(rl.allow("a", "claude").allowed)
-        self.assertTrue(rl.allow("b", "gpt").allowed)
-        s = rl.stats("a", "gpt")
+        self.assertTrue(rl.allow("a", "model-a").allowed)
+        self.assertFalse(rl.allow("a", "model-a").allowed)
+        self.assertTrue(rl.allow("a", "model-b").allowed)
+        self.assertTrue(rl.allow("b", "model-a").allowed)
+        s = rl.stats("a", "model-a")
         self.assertEqual((s.total, s.allowed, s.rejected), (2, 1, 1))
         g = rl.stats()
         self.assertEqual((g.total, g.allowed, g.rejected), (4, 3, 1))
@@ -123,7 +123,7 @@ class IsolationAndStatsTests(unittest.TestCase):
 
 
 class ConcurrencyTests(unittest.TestCase):
-    def _hammer(self, rl, threads=32, per_thread=200, keys=(("a", "gpt"),)):
+    def _hammer(self, rl, threads=32, per_thread=200, keys=(("a", "model-a"),)):
         results = []
         lock = threading.Lock()
         barrier = threading.Barrier(threads)
@@ -159,7 +159,7 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(sum(ok for _, ok in res), 50)
 
     def test_many_keys_concurrently(self):
-        keys = [(c, r) for c in "abcd" for r in ("gpt", "claude")]
+        keys = [(c, r) for c in "abcd" for r in ("model-a", "model-b")]
         rl = RateLimiter(Strategy.SLIDING_WINDOW, limit=10, window=60, clock=FakeClock())
         res = self._hammer(rl, keys=keys)
         for k in keys:
